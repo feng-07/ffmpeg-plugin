@@ -13,6 +13,16 @@ const MAX_SIZE_MB = 10
 const MAX_BATCH_COUNT = 10
 const DELAY_DELETE_SECONDS = 60
 
+function isHttpUrl(url) {
+    return typeof url === 'string' && /^https?:\/\//i.test(url.trim())
+}
+
+function normalizeForApi(input) {
+    return JSON.parse(JSON.stringify(input, (_, value) =>
+        typeof value === 'bigint' ? value.toString() : value
+    ))
+}
+
 // 颜色容差（欧几里得距离阈值）
 const COLOR_TRIM_THRESHOLD = 24
 // 裁剪向内偏移像素（避免边缘过渡残留）
@@ -62,7 +72,57 @@ async function downloadMediaToTemp(url, fallbackExt = null) {
 /**
  * 递归提取消息中的所有图片和视频（异步，支持合并转发）
  */
-async function extractMediaRecursivelyAsync(message, bot) {
+async function resolveMediaUrl(seg, target) {
+    const data = seg?.data || {}
+    const candidates = [
+        seg?.url,
+        data.url,
+        seg?.file,
+        data.file,
+        seg?.src,
+        data.src,
+        seg?.origin,
+        data.origin
+    ]
+
+    for (const candidate of candidates) {
+        if (isHttpUrl(candidate)) return candidate
+    }
+
+    const segPayload = normalizeForApi(seg)
+
+    if (seg?.type === 'video' && target?.getVideoUrl) {
+        try {
+            const url = await target.getVideoUrl(segPayload)
+            if (isHttpUrl(url)) return url
+        } catch (err) {
+            console.warn(`[裁剪] getVideoUrl 失败: ${err.message}`)
+        }
+    }
+
+    if (seg?.type === 'image' && target?.getPicUrl) {
+        try {
+            const url = await target.getPicUrl(segPayload)
+            if (isHttpUrl(url)) return url
+        } catch (err) {
+            console.warn(`[裁剪] getPicUrl 失败: ${err.message}`)
+        }
+    }
+
+    const fid = data.fid || seg?.fid
+    if (fid && target?.getFileUrl) {
+        try {
+            const url = await target.getFileUrl(fid)
+            if (isHttpUrl(url)) return url
+        } catch (err) {
+            console.warn(`[裁剪] getFileUrl 失败: ${err.message}`)
+        }
+    }
+
+    return null
+}
+
+async function extractMediaRecursivelyAsync(message, bot, target) {
     const mediaList = []
 
     const pickForwardIdFromJson = (jsonData) => {
@@ -74,7 +134,7 @@ async function extractMediaRecursivelyAsync(message, bot) {
     if (Array.isArray(message)) {
         for (const seg of message) {
             if (seg.type === 'image' || seg.type === 'video') {
-                const url = seg.url || seg.data?.url || seg.file || seg.data?.file
+                const url = await resolveMediaUrl(seg, target)
                 if (url) mediaList.push({ type: seg.type, url })
                 continue
             }
@@ -86,7 +146,7 @@ async function extractMediaRecursivelyAsync(message, bot) {
                         const forwardMsgs = await bot.getForwardMsg(forwardId)
                         for (const node of forwardMsgs || []) {
                             if (Array.isArray(node?.message)) {
-                                const subMedia = await extractMediaRecursivelyAsync(node.message, bot)
+                                const subMedia = await extractMediaRecursivelyAsync(node.message, bot, target)
                                 mediaList.push(...subMedia)
                             }
                         }
@@ -102,7 +162,7 @@ async function extractMediaRecursivelyAsync(message, bot) {
                 if (Array.isArray(forwardContent)) {
                     for (const item of forwardContent) {
                         if (item?.message) {
-                            const subMedia = await extractMediaRecursivelyAsync(item.message, bot)
+                            const subMedia = await extractMediaRecursivelyAsync(item.message, bot, target)
                             mediaList.push(...subMedia)
                         }
                     }
@@ -115,7 +175,7 @@ async function extractMediaRecursivelyAsync(message, bot) {
                         const forwardMsgs = await bot.getForwardMsg(forwardId)
                         for (const node of forwardMsgs || []) {
                             if (Array.isArray(node?.message)) {
-                                const subMedia = await extractMediaRecursivelyAsync(node.message, bot)
+                                const subMedia = await extractMediaRecursivelyAsync(node.message, bot, target)
                                 mediaList.push(...subMedia)
                             }
                         }
@@ -128,7 +188,7 @@ async function extractMediaRecursivelyAsync(message, bot) {
     } else if (message && typeof message === 'object') {
         const msgArray = message.message
         if (Array.isArray(msgArray)) {
-            const subMedia = await extractMediaRecursivelyAsync(msgArray, bot)
+            const subMedia = await extractMediaRecursivelyAsync(msgArray, bot, target)
             mediaList.push(...subMedia)
         }
     }
@@ -395,9 +455,9 @@ export class cropBlackBorder extends plugin {
         })
     }
 
-    async extractMediaFromMsg(messageArray, bot) {
+    async extractMediaFromMsg(messageArray, bot, target) {
         if (!Array.isArray(messageArray)) return []
-        return await extractMediaRecursivelyAsync(messageArray, bot)
+        return await extractMediaRecursivelyAsync(messageArray, bot, target)
     }
 
     async getReplyMedia(e) {
@@ -405,7 +465,8 @@ export class cropBlackBorder extends plugin {
             try {
                 const rawMsg = await e.getReply()
                 if (rawMsg?.message) {
-                    return await this.extractMediaFromMsg(rawMsg.message, e.bot)
+                    const target = e[e.isGroup ? 'group' : 'friend']
+                    return await this.extractMediaFromMsg(rawMsg.message, e.bot, target)
                 }
             } catch (err) {
                 console.error('[插件] 通过 getReply 获取消息失败:', err)
@@ -421,7 +482,7 @@ export class cropBlackBorder extends plugin {
                         const msgs = await target.getChatHistory(seq, 1)
                         const rawMsg = msgs.pop()
                         if (rawMsg?.message) {
-                            return await this.extractMediaFromMsg(rawMsg.message, e.bot)
+                            return await this.extractMediaFromMsg(rawMsg.message, e.bot, target)
                         }
                     }
                 }
@@ -442,7 +503,8 @@ export class cropBlackBorder extends plugin {
             mediaList = replyMedia
         }
         if (mediaList.length === 0 && e.message) {
-            mediaList = await this.extractMediaFromMsg(e.message, e.bot)
+            const target = e[e.isGroup ? 'group' : 'friend']
+            mediaList = await this.extractMediaFromMsg(e.message, e.bot, target)
         }
         if (mediaList.length === 0) {
             return e.reply(`❌ 请回复或引用一条包含图片/视频的消息，或直接发送带有图片/视频的命令。`, true)
