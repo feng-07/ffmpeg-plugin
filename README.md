@@ -57,7 +57,7 @@
 进入 Yunzai-Bot 目录，执行以下命令：
 
 ```bash
-git clone --depth=1 https://github.com/anyliew/ffmpeg-plugin.git ./plugins/ffmpeg-plugin
+git clone --depth=1 git@github.com:feng-07/ffmpeg-plugin.git ./plugins/ffmpeg-plugin
 cd ./plugins/ffmpeg-plugin
 pnpm i
 ```

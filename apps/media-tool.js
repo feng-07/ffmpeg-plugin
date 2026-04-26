@@ -92,9 +92,50 @@ function getSegField(seg, key) {
     return undefined
 }
 
+function extractFileNameFromProtobufUri(value) {
+    if (typeof value !== 'string' || !value.startsWith('protobuf://')) return ''
+    try {
+        const payload = value.slice('protobuf://'.length)
+        const decoded = Buffer.from(payload, 'base64').toString('utf8')
+        const filenameRegex = /([\p{L}\p{N}_()\-\[\] .]{1,120}\.[a-z0-9]{2,8})/giu
+        let match
+        let lastMatch = ''
+        while ((match = filenameRegex.exec(decoded)) !== null) {
+            lastMatch = match[1]
+        }
+        return lastMatch ? path.basename(lastMatch) : ''
+    } catch {
+        return ''
+    }
+}
+
 function getSegmentFileName(seg, defaultName = '') {
-    const fileName = getSegField(seg, 'filename') || getSegField(seg, 'name') || getSegField(seg, 'file') || ''
-    if (typeof fileName === 'string' && !fileName.startsWith('fid:')) return fileName
+    const pickName = (value) => {
+        if (typeof value !== 'string') return ''
+        const raw = value.trim()
+        if (!raw) return ''
+        if (raw.startsWith('fid:')) return ''
+
+        if (raw.startsWith('protobuf://')) {
+            const decodedName = extractFileNameFromProtobufUri(raw)
+            if (decodedName) return decodedName
+        }
+
+        const base = path.basename(raw.split('?')[0])
+        if (!base || base === '.' || base === '..') return ''
+
+        if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) {
+            return /\.[a-z0-9]{2,8}$/i.test(base) ? base : ''
+        }
+        return base
+    }
+
+    const candidateKeys = ['filename', 'file_name', 'name', 'title', 'file']
+    for (const key of candidateKeys) {
+        const picked = pickName(getSegField(seg, key))
+        if (picked) return picked
+    }
+
     const url = getSegField(seg, 'url')
     if (typeof url === 'string' && url.trim() !== '') {
         const urlPath = url.split('?')[0]
@@ -107,6 +148,29 @@ function getSegmentFileName(seg, defaultName = '') {
 function getSegmentExt(seg) {
     const fileName = getSegmentFileName(seg)
     return path.extname(fileName).toLowerCase()
+}
+
+function sanitizeSendFileName(name, fallbackExt = '.bin') {
+    const defaultExt = fallbackExt || '.bin'
+    const expectedExt = defaultExt.startsWith('.') ? defaultExt : `.${defaultExt}`
+
+    let safeName = typeof name === 'string' ? name.trim() : ''
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(safeName)) {
+        safeName = ''
+    }
+
+    safeName = path.basename(safeName)
+        .replace(/[\u0000-\u001f\u007f<>:"/\\|?*]/g, '_')
+        .replace(/\s+/g, ' ')
+        .trim()
+
+    if (!safeName || safeName === '.' || safeName === '..') {
+        return `file${expectedExt}`
+    }
+
+    const ext = path.extname(safeName) || expectedExt
+    const base = path.basename(safeName, path.extname(safeName)).trim() || 'file'
+    return `${base.slice(0, 80)}${ext}`
 }
 
 async function cleanupTempFile(filePath) {
@@ -592,22 +656,23 @@ export class mediaTool extends plugin {
             throw new Error(`待发送文件为空: ${filePath}`)
         }
 
+        const fallbackExt = path.extname(filePath) || '.bin'
+        const safeDisplayName = sanitizeSendFileName(displayName, fallbackExt)
         const fileSizeMB = (stat.size / (1024 * 1024)).toFixed(2)
-        logger.info(`[多媒体插件] 准备发送文件: ${displayName}, 大小 ${fileSizeMB} MB, 路径: ${filePath}`)
+        logger.info(`[多媒体插件] 准备发送文件: ${safeDisplayName}, 大小 ${fileSizeMB} MB, 路径: ${filePath}`)
 
         let res
         if (e.isGroup) {
             if (e.group?.sendFile) {
                 try {
-                    // 尽量使用原始显示名（与来源文件名保持一致）
-                    res = await e.group.sendFile(filePath, '/', displayName)
+                    res = await e.group.sendFile(filePath, '/', safeDisplayName)
                 } catch (err) {
                     logger.warn(`[多媒体插件] 群聊 sendFile(带文件名) 失败，回退默认参数: ${err.message}`)
                     res = await e.group.sendFile(filePath)
                 }
                 logger.info('[多媒体插件] 群聊文件发送成功 (e.group.sendFile)')
             } else if (e.group?.fs?.upload) {
-                res = await e.group.fs.upload(filePath, '/', displayName)
+                res = await e.group.fs.upload(filePath, '/', safeDisplayName)
                 logger.info('[多媒体插件] 群聊文件上传成功 (e.group.fs.upload)')
             } else {
                 throw new Error('当前群聊环境不支持文件发送/上传')
@@ -617,7 +682,7 @@ export class mediaTool extends plugin {
                 throw new Error('当前私聊环境不支持文件发送')
             }
             try {
-                res = await e.friend.sendFile(filePath, displayName)
+                res = await e.friend.sendFile(filePath, safeDisplayName)
             } catch (err) {
                 logger.warn(`[多媒体插件] 私聊 sendFile(带文件名) 失败，回退默认参数: ${err.message}`)
                 res = await e.friend.sendFile(filePath)

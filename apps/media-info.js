@@ -409,19 +409,28 @@ export class mediaInfo extends plugin {
 
     _getFileExtension(segment) {
         const data = segment.data || {}
-        if (data.file && typeof data.file === 'string') {
-            const ext = path.extname(data.file).toLowerCase().slice(1)
-            if (ext) return ext
-        }
-        if (data.url && typeof data.url === 'string') {
-            try {
-                const urlPath = new URL(data.url).pathname
-                const ext = path.extname(urlPath).toLowerCase().slice(1)
-                if (ext) return ext
-            } catch (e) {}
-        }
-        if (data.filename && typeof data.filename === 'string') {
-            const ext = path.extname(data.filename).toLowerCase().slice(1)
+        const nameCandidates = [
+            data.filename,
+            data.file_name,
+            data.name,
+            data.title,
+            data.file,
+            segment.file,
+            data.url,
+            segment.url
+        ]
+
+        for (const candidate of nameCandidates) {
+            if (typeof candidate !== 'string' || !candidate.trim()) continue
+            let source = candidate
+            if (/^https?:\/\//i.test(source)) {
+                try {
+                    source = new URL(source).pathname
+                } catch (e) {
+                    source = source.split('?')[0]
+                }
+            }
+            const ext = path.extname(source).toLowerCase().slice(1)
             if (ext) return ext
         }
         return null
@@ -429,16 +438,41 @@ export class mediaInfo extends plugin {
 
     extractAudiosFromMsg(messageArray) {
         if (!Array.isArray(messageArray)) return []
-        const audioExtensions = ['mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a', 'opus', 'wma', 'ape']
+        const audioExtensions = ['mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a', 'opus', 'wma', 'ape', 'amr', 'silk', 'weba', 'mpga', 'aif', 'aiff']
         return messageArray.filter(seg => {
+            const data = seg?.data || {}
             if (seg.type === 'audio' || seg.type === 'record') return true
-            if (seg.type === 'file' && seg.data?.file_type === 'audio') return true
             if (seg.type === 'file') {
+                if (data.file_type === 'audio') return true
+                if (typeof data.mime === 'string' && data.mime.toLowerCase().startsWith('audio/')) return true
+                if (typeof data.contentType === 'string' && data.contentType.toLowerCase().startsWith('audio/')) return true
                 const ext = this._getFileExtension(seg)
                 return ext && audioExtensions.includes(ext)
             }
             return false
         })
+    }
+
+    async detectAudioFilesByProbe(messageArray, e) {
+        if (!Array.isArray(messageArray)) return []
+        const fileSegments = messageArray.filter(seg => seg?.type === 'file')
+        const detected = []
+
+        for (const seg of fileSegments) {
+            let url = null
+            let tempFilePath = null
+            try {
+                url = await this._getMediaUrl(seg, e)
+                tempFilePath = await downloadMediaToTemp(url)
+                await getAudioInfoByFfprobe(tempFilePath)
+                detected.push(seg)
+            } catch (err) {
+                // ignore non-audio file segment
+            } finally {
+                if (tempFilePath) await fs.unlink(tempFilePath).catch(() => {})
+            }
+        }
+        return detected
     }
 
     extractImagesFromMsg(messageArray) {
@@ -469,8 +503,9 @@ export class mediaInfo extends plugin {
 
     getDisplayName(segment, defaultPrefix, idx) {
         const data = segment.data || {}
-        if (data.filename && typeof data.filename === 'string') {
-            return data.filename
+        const nameCandidates = [data.filename, data.file_name, data.name, data.title]
+        for (const name of nameCandidates) {
+            if (typeof name === 'string' && name.trim()) return name.trim()
         }
         if (data.file && typeof data.file === 'string') {
             const base = path.basename(data.file)
@@ -497,10 +532,16 @@ export class mediaInfo extends plugin {
         const replyMsg = await this.getReplyMsg(e)
         if (replyMsg && replyMsg.message) {
             audios = this.extractAudiosFromMsg(replyMsg.message)
+            if (audios.length === 0) {
+                audios = await this.detectAudioFilesByProbe(replyMsg.message, e)
+            }
         }
 
         if (audios.length === 0 && e.message) {
             audios = this.extractAudiosFromMsg(e.message)
+            if (audios.length === 0) {
+                audios = await this.detectAudioFilesByProbe(e.message, e)
+            }
         }
 
         if (audios.length === 0) {
