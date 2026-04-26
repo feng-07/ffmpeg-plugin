@@ -1,0 +1,13 @@
+{
+  "name": "ffmpeg-plugin",
+  "version": "1.0.0",
+  "description": "基于 FFmpeg 的 Yunzai-Bot 插件，提供图像、音视频处理及信息查询功能",
+  "main": "index.js",
+  "author": "Anyliew",
+  "dependencies": {
+    "axios": "^1.15.0",
+    "sharp": "^0.34.5",
+    "archiver": "^7.0.1"
+  },
+  "type": "module"
+}
