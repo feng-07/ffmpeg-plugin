@@ -7,7 +7,7 @@ export class ffmpegUpdate extends plugin {
     super({
       name: "[ffmpeg-plugin]FFmpeg插件更新",
       dsc: "#ff更新 / #ffmpeg-plugin更新",
-      event: "message.group",
+      event: "message",
       priority: -Infinity,
       rule: [
         {
@@ -129,6 +129,10 @@ export class ffmpegUpdate extends plugin {
 
   // 获取远程仓库名
   async getRemote(branch, cwdPath) {
+    // 分支名只能包含字母数字、连字符、下划线、斜杠和点
+    if (!/^[a-zA-Z0-9._\/\-]+$/.test(branch)) {
+      throw new Error(`非法分支名: ${branch}`)
+    }
     const ret = await this.exec(`git config branch.${branch}.remote`, cwdPath)
     return ret.stdout.trim()
   }
